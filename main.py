@@ -1,11 +1,11 @@
 import logging
 import os
+import json
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart, Command
 import uvicorn
 
 # .env yuklash
@@ -14,112 +14,138 @@ load_dotenv()
 # Konfiguratsiya
 API_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID"))
+JSON_FILE = "privileged_users.json"
 
-# Bot va Dispatcher obyektlari
+# Bot va Dispatcher
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Foydalanuvchi qaysi link egasiga yozayotganini saqlash (DB-siz vaqtincha xotira)
-# Kalit: yozayotgan odam ID, Qiymat: qabul qiluvchi ID
+# Vaqtincha xotira
 active_sessions = {}
 
-# --- LIFESPAN HANDLER ---
+# --- JSON MA'LUMOTLAR BAZASI BILAN ISHLASH ---
+
+def load_privileged_users():
+    if not os.path.exists(JSON_FILE):
+        with open(JSON_FILE, "w") as f:
+            json.dump([], f)
+        return []
+    with open(JSON_FILE, "r") as f:
+        return json.load(f)
+
+def save_privileged_user(user_id: int):
+    users = load_privileged_users()
+    if user_id not in users:
+        users.append(user_id)
+        with open(JSON_FILE, "w") as f:
+            json.dump(users, f)
+        return True
+    return False
+
+def remove_privileged_user(user_id: int):
+    users = load_privileged_users()
+    if user_id in users:
+        users.remove(user_id)
+        with open(JSON_FILE, "w") as f:
+            json.dump(users, f)
+        return True
+    return False
+
+# --- LIFESPAN ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Dastur ishga tushganda (Startup)
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        allowed_updates=dp.resolve_used_update_types(),
-        drop_pending_updates=True
-    )
-    logging.info("Webhook muvaffaqiyatli o'rnatildi")
-
-    yield  # Shu yerda FastAPI ishlaydi
-
-    # Dastur to'xtaganda (Shutdown)
+    await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
+    logging.info("Webhook o'rnatildi")
+    yield
     await bot.delete_webhook()
     await bot.session.close()
-    logging.info("Sessiya yopildi")
 
 app = FastAPI(lifespan=lifespan)
 
-# --- BOT LOGIKASI ---
+# --- ADMIN KOMANDALARI ---
+
+@dp.message(Command("add_privilege"), F.from_user.id == MAIN_ADMIN_ID)
+async def cmd_add_privilege(message: types.Message):
+    try:
+        user_id = int(message.text.split()[1])
+        if save_privileged_user(user_id):
+            await message.answer(f"✅ Foydalanuvchi {user_id} endi yuboruvchi ma'lumotlarini ko'ra oladi.")
+        else:
+            await message.answer("ℹ️ Bu foydalanuvchi allaqachon ro'yxatda bor.")
+    except (IndexError, ValueError):
+        await message.answer("❌ Xato! Format: `/add_privilege ID`", parse_mode="Markdown")
+
+@dp.message(Command("remove_privilege"), F.from_user.id == MAIN_ADMIN_ID)
+async def cmd_remove_privilege(message: types.Message):
+    try:
+        user_id = int(message.text.split()[1])
+        if remove_privileged_user(user_id):
+            await message.answer(f"🗑 Foydalanuvchi {user_id} ro'yxatdan o'chirildi.")
+        else:
+            await message.answer("❌ Bu foydalanuvchi ro'yxatda topilmadi.")
+    except (IndexError, ValueError):
+        await message.answer("❌ Xato! Format: `/remove_privilege ID`", parse_mode="Markdown")
+
+# --- ASOSIY LOGIKA ---
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     args = message.text.split()
 
-    # 1. Agar foydalanuvchi birovning linki orqali kirgan bo'lsa
     if len(args) > 1:
         receiver_id = int(args[1])
         if receiver_id == message.from_user.id:
-            await message.answer("O'zingizga o'zingiz xabar yoza olmaysiz! 😅")
+            await message.answer("O'zingizga xabar yoza olmaysiz!")
             return
 
         active_sessions[message.from_user.id] = receiver_id
-        await message.answer(
-            "Siz hozir anonim xabar yuborish rejimidasiz. 🤫\n"
-            "Xabaringizni yozing, men uni egasiga yetkazaman!"
-        )
+        await message.answer("Xabaringizni yozing, men uni anonim tarzda yetkazaman! 🤫")
         return
 
-    # 2. Onboarding (Yangi foydalanuvchi uchun)
     bot_info = await bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
-
-    welcome_msg = (
+    await message.answer(
         f"Salom, {message.from_user.full_name}! 👋\n\n"
-        "Bu anonim xabarlar botiga xush kelibsiz.\n"
-        "Sizga ham anonim xabar yozishlarini istasangiz, quyidagi linkni do'stlariga ulashing:\n\n"
-        f"🔗 `{link}`\n\n"
-        "Xabar kelganida, men sizga yuboruvchining ma'lumotlarini ham ko'rsataman! ✅"
+        f"Sizning anonim havolangiz:\n🔗 `{link}`",
+        parse_mode="Markdown"
     )
-    await message.answer(welcome_msg, parse_mode="Markdown")
 
 @dp.message(F.text & ~F.text.startswith('/'))
-async def handle_incoming_messages(message: types.Message):
+async def handle_messages(message: types.Message):
     user_id = message.from_user.id
 
-    # A. Anonim xabarga javob qaytarish logikasi
+    # Javob qaytarish (Reply)
     if message.reply_to_message and "Yuboruvchi ID:" in message.reply_to_message.text:
         try:
-            # Xabardan yuboruvchi ID sini qirqib olish
-            original_sender_id = int(message.reply_to_message.text.split("ID:")[1].strip())
-            await bot.send_message(
-                original_sender_id,
-                f"Siz yuborgan anonim xabarga javob keldi:\n\n💬 {message.text}"
-            )
-            await message.answer("Javobingiz yetkazildi! ✅")
-        except Exception as e:
-            await message.answer("Xatolik: Xabarni yetkazib bo'lmadi. Foydalanuvchi botni bloklagan bo'lishi mumkin.")
+            target_id = int(message.reply_to_message.text.split("ID:")[1].strip())
+            await bot.send_message(target_id, f"Sizning xabaringizga javob keldi:\n\n💬 {message.text}")
+            await message.answer("Javob yuborildi! ✅")
+        except:
+            await message.answer("Xato: Yuborib bo'lmadi.")
         return
 
-    # B. Anonim xabar yuborish
+    # Anonim xabar yuborish
     if user_id in active_sessions:
         receiver_id = active_sessions[user_id]
+        privileged_list = load_privileged_users()
 
-        # Maxsus funksiya: Yuboruvchi ma'lumotlarini qo'shish
-        sender_info = (
-            f"👤 Ismi: {message.from_user.full_name}\n"
-            f"🆔 Yuboruvchi ID: {user_id}"
-        )
+        # PRIVILEGE TEKSHIRUVI: Qabul qiluvchi ro'yxatda bormi?
+        if receiver_id in privileged_list:
+            sender_data = f"\n\n--- Ma'lumotlar ---\n👤 Ismi: {message.from_user.full_name}\n🆔 Yuboruvchi ID: {user_id}"
+        else:
+            sender_data = f"\n\n🆔 Yuboruvchi ID: {user_id}" # Reply ishlashi uchun ID yashirin qolishi kerak
 
         try:
             await bot.send_message(
                 receiver_id,
-                f"Sizda yangi anonim xabar! 📩\n\n"
-                f"📝 Xabar: {message.text}\n\n"
-                f"--- Ma'lumotlar ---\n{sender_info}"
+                f"📩 Yangi anonim xabar:\n\n📝 {message.text}{sender_data}"
             )
-            await message.answer("Xabaringiz anonim tarzda yuborildi! 🚀")
-            # Bir marta yuborgandan keyin sessiyani o'chirish (ixtiyoriy)
-            # del active_sessions[user_id]
-        except Exception:
-            await message.answer("Xabarni yuborishda xatolik yuz berdi.")
+            await message.answer("Xabar yetkazildi! 🚀")
+        except:
+            await message.answer("Xabar yuborishda xatolik.")
     else:
-        await message.answer("Xabar yuborish uchun avval birovning linki orqali kiring.")
-
-# --- FASTAPI WEBHOOK ---
+        await message.answer("Xabar yuborish uchun link ustiga bosing.")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
