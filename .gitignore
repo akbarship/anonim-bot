@@ -1,0 +1,27 @@
+# Python kesh fayllari
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual muhit (Virtual Environment)
+venv/
+env/
+.venv/
+
+# Maxfiy ma'lumotlar (Buni hech qachon GitHub-ga yuklamang!)
+.env
+
+# Ma'lumotlar bazasi (JSON fayl)
+# Local test ma'lumotlari serverga aralashib ketmasligi uchun
+privileged_users.json
+
+# IDE sozlamalari
+.vscode/
+.idea/
+
+# Operatsion tizim fayllari
+.DS_Store
+Thumbs.db
+
+# Fly.io loglari (agar ishlatsangiz)
+*.log
