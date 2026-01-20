@@ -1,2 +1,0 @@
-# anonim-bot
-Anonim bot
